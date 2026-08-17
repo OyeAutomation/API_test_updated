@@ -1,0 +1,7 @@
+postman request POST 'https://app.benepik.in/benepik_Nomination_AdminPannel/bulkupload/get-bulk-upload-fields' \
+  --header 'Content-Type: application/json' \
+  --header 'Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJlbXBsb3llZV9pZCI6IjY2MSIsInJhbmRvbVN0cmluZyI6IjBhMTkwZDUzYzJhYWRjNWQ3ZTQ0ZDEyNmRmYTJkYjc3IiwiaXAiOiIxODAuMTUxLjI0Ny4xMDAiLCJicm93c2VyIjoiQ2hyb21lIiwiaWF0IjoxNzgyMjg4MjA2LCJleHAiOjE3ODIyODkxMDZ9.C0LauonWTq1hjMis1e4JTLQcsSzngug3aFQEmCMKSvQ' \
+  --body '{
+    "checksum" : "U2FsdGVkX1/BDzx7V+W/lgoO/BJH2rwlkXLIscpaXCQCrzqjA8hclEuiGW5OPdMz"
+}' \
+  --auth-bearer-token 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJlbXBsb3llZV9pZCI6IjY2MSIsInJhbmRvbVN0cmluZyI6IjBhMTkwZDUzYzJhYWRjNWQ3ZTQ0ZDEyNmRmYTJkYjc3IiwiaXAiOiIxODAuMTUxLjI0Ny4xMDAiLCJicm93c2VyIjoiQ2hyb21lIiwiaWF0IjoxNzgyMjg4MjA2LCJleHAiOjE3ODIyODkxMDZ9.C0LauonWTq1hjMis1e4JTLQcsSzngug3aFQEmCMKSvQ'

@@ -1,0 +1,10 @@
+request_delay_ms: 200
+timeout_seconds: 30
+max_retries: 3
+validation_error_keywords:
+  - "required"
+  - "missing"
+  - "mandatory"
+  - "error"
+  - "invalid"
+max_nesting_depth: 3

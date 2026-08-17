@@ -1,0 +1,4 @@
+curl -X POST http://localhost:5000/api/register \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer valid-token-12345" \
+  -d '{"username":"john_doe","email":"john@test.com","password":"secret123"}'

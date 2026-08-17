@@ -1,0 +1,157 @@
+profiles:
+  - name: default
+    algorithm: AES-256-CBC
+    key_derivation: PBKDF2HMAC
+    hash: SHA256
+    iterations: 10000
+    key: "my-secret-api-key-12345"
+    key_encoding: utf8
+    salt: "fixed-salt-value"
+    salt_encoding: utf8
+    iv: random
+    iv_encoding: utf8
+    prepend_iv_to_output: true
+    output_encoding: base64
+
+  - name: aes256-gcm
+    algorithm: AES-256-GCM
+    key_derivation: PBKDF2HMAC
+    hash: SHA256
+    iterations: 1000
+    key: "%XsU5dflAg^iIyQB"
+    key_encoding: utf8
+    salt: "gcm-salt-12345"
+    salt_encoding: utf8
+    iv: random
+    iv_length: 12
+    iv_encoding: utf8
+    prepend_iv_to_output: true
+    tag_length: 128
+    output_encoding: base64
+    checksum_field: checksum
+
+  - name: raw-key
+    algorithm: AES-128-CBC
+    key_derivation: NONE
+    key: "0123456789abcdef0123456789abcdef"
+    key_encoding: hex
+    iv: random
+    iv_encoding: utf8
+    prepend_iv_to_output: true
+    output_encoding: hex
+
+  - name: cryptojs-style
+    algorithm: AES-256-CBC
+    key_derivation: EVP_BytesToKey
+    hash: MD5
+    iterations: 1
+    key: "India#321"
+    key_encoding: utf8
+    salt: "cryptojs-salt"
+    salt_encoding: utf8
+    iv: random
+    iv_encoding: utf8
+    prepend_iv_to_output: true
+    output_encoding: base64
+    checksum_field: checksum
+    
+  - name: whatsapp-checksum
+    algorithm: AES-128-GCM
+    key_derivation: NONE
+    iterations: 1
+    key: "tHeApAcHe6410118"
+    key_encoding: utf8
+    iv: random
+    iv_length: 12
+    iv_encoding: utf8
+    prepend_iv_to_output: true
+    tag_length: 128
+    output_encoding: base64
+    checksum_field: checksum
+    
+  - name: cryptojs-response
+    algorithm: AES-256-CBC
+    key_derivation: EVP_BytesToKey
+    hash: MD5
+    key: "123#@benepik#321"
+    key_encoding: utf8
+    iv: random
+    iv_encoding: utf8
+    prepend_iv_to_output: true
+    output_encoding: base64
+    checksum_field: checksum
+   
+   
+  - name: aes256-gcm-response
+    algorithm: AES-256-GCM
+    key_derivation: PBKDF2HMAC
+    hash: SHA256
+    iterations: 1000
+    key: "%XsU5dflAg^iIyQB"
+    key_encoding: utf8
+    salt: ""
+    salt_from_data: true
+    iv: random
+    iv_length: 12
+    iv_encoding: utf8
+    prepend_iv_to_output: false
+    tag_length: 128
+    output_encoding: base64
+    checksum_field: checksum
+
+  - name: hero
+    algorithm: AES-256-GCM
+    key_derivation: PBKDF2HMAC
+    hash: SHA256
+    iterations: 1000
+    key: "QmVuZXBpa0AyMDIzX0JlbmVwaWtQbHVz"
+    key_encoding: utf8
+    salt: ""
+    salt_from_data: true
+    iv: random
+    iv_length: 12
+    iv_encoding: utf8
+    prepend_iv_to_output: false
+    tag_length: 128
+    output_encoding: base64url
+
+  - name: linkshortner_crypto
+    algorithm: AES-256-CBC
+    key_derivation: EVP_BytesToKey
+    hash: MD5
+    iterations: 1
+    key: "LINKSHORTNER7867#%^&*$%^&&*"
+    key_encoding: utf8
+    iv: random
+    iv_length: 16
+    iv_encoding: utf8
+    iv_from_data: true
+    prepend_iv_to_output: true
+    output_encoding: base64
+    checksum_field: checksum
+
+  - name: insights-payload
+    algorithm: AES-128-GCM
+    key_derivation: NONE
+    key: "123#@benepik@321"
+    key_encoding: utf8
+    iv: random
+    iv_length: 12
+    tag_length: 128
+    output_encoding: base64
+    checksum_field: data
+    gcm_nonce_field: nonce
+    gcm_tag_field: tag
+
+  - name: insights-response
+    algorithm: AES-128-GCM
+    key_derivation: NONE
+    key: "123#@benepik@321"
+    key_encoding: utf8
+    iv: random
+    iv_length: 12
+    tag_length: 128
+    output_encoding: base64
+    checksum_field: data
+    gcm_nonce_field: nonce
+    gcm_tag_field: tag
