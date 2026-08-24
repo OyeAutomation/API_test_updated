@@ -1,0 +1,11 @@
+name: mock-order
+match: "localhost:5000/api/order"
+archetype: write
+auth_required: false
+body_type: json
+expected_success_code: 201
+idempotency_required: true
+idempotency_key: order_ref
+sensitive_fields:
+  - token
+sla_seconds: 5

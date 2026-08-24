@@ -1,0 +1,14 @@
+name: mock-items
+match: "localhost:5000/api/items"
+archetype: read_list
+auth_required: false
+body_type: none
+expected_success_code: 200
+query_params:
+  - page
+  - status
+response_schema:
+  success: int
+  message: string
+  data: list
+sla_seconds: 5

@@ -1,0 +1,6 @@
+name: mock-protected
+match: "localhost:5000/api/protected"
+archetype: read_list
+auth_required: true
+body_type: none
+expected_success_code: 200

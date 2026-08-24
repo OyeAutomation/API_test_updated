@@ -15,18 +15,14 @@ class HttpMethod(str, Enum):
 
 
 class ParsedRequest(BaseModel):
-    method: HttpMethod = HttpMethod.GET
+    method: str = "GET"
     url: str
     headers: Dict[str, str] = Field(default_factory=dict)
     query_params: Dict[str, str] = Field(default_factory=dict)
     body_raw: str = ""
     body_json: Optional[Dict[str, Any]] = None
     cookies: Dict[str, str] = Field(default_factory=dict)
-
-    @property
-    def has_json_body(self) -> bool:
-        ct = self.headers.get("Content-Type", "")
-        return "application/json" in ct.lower() or self.body_json is not None
+    insecure: bool = False
 
 
 class KeyDerivation(str, Enum):
@@ -45,10 +41,6 @@ class KeyEncoding(str, Enum):
     utf8 = "utf8"
     base64 = "base64"
     hex = "hex"
-
-
-class IvMode(str, Enum):
-    random = "random"
 
 
 class OutputEncoding(str, Enum):
@@ -86,6 +78,7 @@ class CryptoProfile(BaseModel):
     checksum_field: Optional[str] = None
     gcm_nonce_field: Optional[str] = None
     gcm_tag_field: Optional[str] = None
+    fallback_keys: List[str] = Field(default_factory=list)
 
     @field_validator("iterations")
     @classmethod
@@ -101,9 +94,32 @@ class CryptoProfile(BaseModel):
             raise ValueError("key must not be empty")
         return v
 
-
-class CryptoConfig(BaseModel):
-    profiles: List[CryptoProfile] = Field(default_factory=list)
+    @model_validator(mode="after")
+    def validate_iv_usage(self):
+        gcm = self.algorithm in (Algorithm.AES_256_GCM, Algorithm.AES_128_GCM)
+        if gcm:
+            if self.iv != "random":
+                raise ValueError(
+                    f"GCM profile '{self.name}' must use 'iv: random'; "
+                    "a fixed IV/nonce would be reused across requests, "
+                    "which is insecure and produces identical ciphertexts"
+                )
+            if self.iv_length not in (8, 12, 16):
+                raise ValueError(
+                    f"GCM profile '{self.name}' requires iv_length of 8, 12 or 16 "
+                    f"(NIST-allowed nonce sizes), got {self.iv_length}"
+                )
+        elif self.iv == "random" and not self.prepend_iv_to_output:
+            raise ValueError(
+                f"CBC profile '{self.name}' cannot combine 'iv: random' with "
+                "'prepend_iv_to_output: false' — the IV would not be stored "
+                "and could never be recovered at decryption time"
+            )
+        if self.gcm_nonce_field and not self.checksum_field:
+            raise ValueError(
+                f"Profile '{self.name}' sets gcm_nonce_field but no checksum_field"
+            )
+        return self
 
 
 class TestCaseScope(str, Enum):
@@ -134,11 +150,25 @@ class MutationType(str, Enum):
     OVERSIZED_PAYLOAD = "oversized_payload"
     UNICODE_EMOJI = "unicode_emoji"
     WRONG_TYPE = "wrong_type"
+    MALFORMED_JSON = "malformed_json"
     HEADER_MISSING = "header_missing"
     HEADER_INVALID_VALUE = "header_invalid_value"
     AUTH_TOKEN_MISSING = "auth_token_missing"
     AUTH_TOKEN_INVALID = "auth_token_invalid"
     AUTH_TOKEN_EXPIRED = "auth_token_expired"
+    BASELINE = "baseline"
+    QUERY_PARAM_INVALID = "query_param_invalid"
+    QUERY_PARAM_INJECT = "query_param_inject"
+    METHOD_CHANGE = "method_change"
+    INJECT_EXTRA_KEY = "inject_extra_key"
+    NOSQL_INJECTION = "nosql_injection"
+    SECURITY_HEADERS_CHECK = "security_headers_check"
+    CORS_CHECK = "cors_check"
+    SENSITIVE_DATA_SCAN = "sensitive_data_scan"
+    ERROR_LEAK_SCAN = "error_leak_scan"
+    SCHEMA_VALIDATION = "schema_validation"
+    PERFORMANCE_CHECK = "performance_check"
+    DUPLICATE_SUBMIT = "duplicate_submit"
 
 
 class TestCase(BaseModel):
@@ -158,6 +188,7 @@ class TestResult(BaseModel):
     api: str
     key: str
     test_case: str
+    test_case_id: str = ""
     test_case_type: str
     status: str
     mandatory: str
@@ -172,7 +203,6 @@ class Settings(BaseModel):
     request_delay_ms: int = 200
     timeout_seconds: int = 30
     max_retries: int = 3
-    baseline_comparison_threshold: float = 0.8
     validation_error_keywords: List[str] = Field(
         default_factory=lambda: ["required", "missing", "mandatory"]
     )

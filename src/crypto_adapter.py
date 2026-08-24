@@ -112,11 +112,10 @@ class CryptoAdapter:
                 logger.debug(f"CryptoJS decrypt with profile key failed: {e}")
                 pass
 
-            # Try fallback CryptoJS keys (for curl files with hardcoded CryptoJS checksums)
+            # Try fallback CryptoJS keys (configured via profile.fallback_keys)
             # When a fallback key succeeds, set format to "standard" so re-encryption
             # uses the profile's own encryption (GCM/CBC) rather than CryptoJS.
-            _fallback_cryptojs_keys = ["India#321", "123#@benepik#321"]
-            for fallback_key in _fallback_cryptojs_keys:
+            for fallback_key in profile.fallback_keys:
                 if fallback_key == profile.key:
                     continue
                 try:
@@ -349,9 +348,10 @@ class CryptoAdapter:
         tag = base64.b64decode(tag_b64)
         ciphertext = base64.b64decode(data_b64)
         key = self._derive_key()
+        aad = self.profile.aad.encode("utf-8") if self.profile.aad else b""
         cipher = Cipher(algorithms.AES(key), modes.GCM(nonce, tag))
         decryptor = cipher.decryptor()
-        decryptor.authenticate_additional_data(b"")
+        decryptor.authenticate_additional_data(aad)
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
         return json.loads(plaintext.decode("utf-8"))
 
@@ -362,8 +362,9 @@ class CryptoAdapter:
         plaintext = json.dumps(inner_json, separators=(",", ":")).encode("utf-8")
         nonce = os.urandom(12)
         key = self._derive_key()
+        aad = profile.aad.encode("utf-8") if profile.aad else b""
         encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
-        encryptor.authenticate_additional_data(b"")
+        encryptor.authenticate_additional_data(aad)
         ciphertext = encryptor.update(plaintext) + encryptor.finalize()
         tag = encryptor.tag
         return {
@@ -393,8 +394,9 @@ class CryptoAdapter:
         algo = profile.algorithm
 
         if algo in (Algorithm.AES_256_GCM, Algorithm.AES_128_GCM):
+            aad = profile.aad.encode("utf-8") if profile.aad else b""
             encryptor = Cipher(algorithms.AES(key), modes.GCM(iv)).encryptor()
-            encryptor.authenticate_additional_data(b"")
+            encryptor.authenticate_additional_data(aad)
             ciphertext = encryptor.update(plaintext) + encryptor.finalize()
             tag = encryptor.tag
             body = iv + ciphertext + tag
@@ -407,7 +409,10 @@ class CryptoAdapter:
             cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
             encryptor = cipher.encryptor()
             ciphertext = encryptor.update(padded_data) + encryptor.finalize()
-            if profile.prepend_iv_to_output:
+            if salt is not None:
+                # Salt is random per-encryption, so the IV must be stored with it
+                output = salt + iv + ciphertext
+            elif profile.prepend_iv_to_output:
                 output = iv + ciphertext
             else:
                 output = ciphertext
@@ -420,6 +425,7 @@ class CryptoAdapter:
         algo = profile.algorithm
 
         if algo in (Algorithm.AES_256_GCM, Algorithm.AES_128_GCM):
+            aad = profile.aad.encode("utf-8") if profile.aad else b""
             if profile.salt_from_data:
                 salt_len = 16
                 salt = raw[:salt_len]
@@ -427,7 +433,7 @@ class CryptoAdapter:
                 ct_with_tag = raw[salt_len + profile.iv_length:]
                 key = self._derive_key(salt_override=salt)
                 aesgcm = AESGCM(key)
-                plaintext = aesgcm.decrypt(iv, ct_with_tag, None)
+                plaintext = aesgcm.decrypt(iv, ct_with_tag, aad)
             else:
                 key = self._derive_key()
                 iv_len = profile.iv_length
@@ -437,17 +443,25 @@ class CryptoAdapter:
                 ct = raw[iv_len:-tag_len]
                 cipher = Cipher(algorithms.AES(key), modes.GCM(iv, tag))
                 decryptor = cipher.decryptor()
-                decryptor.authenticate_additional_data(b"")
+                decryptor.authenticate_additional_data(aad)
                 plaintext = decryptor.update(ct) + decryptor.finalize()
         else:
-            key = self._derive_key()
-            if profile.prepend_iv_to_output:
-                iv_len = profile.iv_length
-                iv = raw[:iv_len]
-                ct = raw[iv_len:]
+            if profile.salt_from_data:
+                # Layout: salt(16) + iv + ciphertext
+                salt = raw[:16]
+                key = self._derive_key(salt_override=salt)
+                rest = raw[16:]
+                iv = rest[:profile.iv_length]
+                ct = rest[profile.iv_length:]
             else:
-                iv = self._get_iv()
-                ct = raw
+                key = self._derive_key()
+                if profile.prepend_iv_to_output:
+                    iv_len = profile.iv_length
+                    iv = raw[:iv_len]
+                    ct = raw[iv_len:]
+                else:
+                    iv = self._get_iv()
+                    ct = raw
             cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
             decryptor = cipher.decryptor()
             padded = decryptor.update(ct) + decryptor.finalize()

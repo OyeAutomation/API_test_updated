@@ -64,6 +64,59 @@ def test_cbc_hex_roundtrip():
     assert json.loads(decrypted) == data
 
 
+def test_cbc_salt_from_data_roundtrip():
+    """Regression: CBC + salt_from_data used to encrypt with a random salt that
+    was never stored, making the output undecryptable."""
+    profile = _make_profile(
+        algorithm="AES-256-CBC", key_derivation="PBKDF2HMAC",
+        key="passphrase", salt_from_data=True, iterations=1000,
+    )
+    adapter = CryptoAdapter(profile)
+    data = {"a": 1, "b": "hello"}
+    encrypted = adapter.encrypt_payload(data)
+    decrypted = adapter.decrypt_payload(encrypted)
+    import json
+    assert json.loads(decrypted) == data
+
+
+def test_cbc_fixed_iv_without_prepend_roundtrip():
+    """prepend_iv_to_output=False works when the IV is a fixed literal."""
+    profile = _make_profile(
+        algorithm="AES-256-CBC", key_derivation="NONE",
+        key="0123456789abcdef0123456789abcdef", key_encoding="hex",
+        iv="0123456789abcdef", prepend_iv_to_output=False,
+    )
+    adapter = CryptoAdapter(profile)
+    data = {"x": "y"}
+    encrypted = adapter.encrypt_payload(data)
+    decrypted = adapter.decrypt_payload(encrypted)
+    import json
+    assert json.loads(decrypted) == data
+
+
+def test_cbc_random_iv_without_prepend_rejected():
+    """Regression: prepend_iv_to_output=False + random IV was silently
+    un-decryptable; it must now be rejected at profile load."""
+    with pytest.raises(ValueError, match="prepend_iv_to_output"):
+        _make_profile(
+            algorithm="AES-256-CBC", key_derivation="NONE",
+            key="0123456789abcdef0123456789abcdef", key_encoding="hex",
+            iv="random", prepend_iv_to_output=False,
+        )
+
+
+def test_gcm_fixed_iv_rejected():
+    """Regression: GCM with a fixed IV reused the nonce across requests,
+    producing identical ciphertexts; must be rejected at profile load."""
+    with pytest.raises(ValueError, match="random"):
+        _make_profile(algorithm="AES-256-GCM", iv="0123456789ab")
+
+
+def test_gcm_iv_length_validation():
+    with pytest.raises(ValueError, match="iv_length"):
+        _make_profile(algorithm="AES-256-GCM", iv_length=4)
+
+
 def test_gcm_roundtrip():
     profile = _make_profile(algorithm="AES-256-GCM", key_derivation="NONE",
                             key="0123456789abcdef0123456789abcdef", key_encoding="hex",
@@ -288,3 +341,98 @@ def test_split_gcm_response_profile():
     inner = {"token": "", "hasToken": 0}
     wrapped = adapter.encrypt_body_json({}, inner)
     assert adapter.decrypt_response_json(wrapped) == inner
+
+
+def _java_email_profile():
+    """JS encryptForJavaEmailMicroService layout: PBKDF2-SHA256 x100000,
+    salt(16) + iv(12) + ciphertext + tag(16), base64, AES-256-GCM."""
+    return CryptoProfile(
+        name="java-email-microservice",
+        algorithm=Algorithm.AES_256_GCM,
+        key_derivation=KeyDerivation.PBKDF2HMAC,
+        hash="SHA256",
+        iterations=100000,
+        key="HeroFin@82#Xq9Lm4VzTp7Nk1RsY$G%H",
+        key_encoding=KeyEncoding.utf8,
+        salt="",
+        salt_from_data=True,
+        iv="random",
+        iv_length=12,
+        iv_encoding=KeyEncoding.utf8,
+        prepend_iv_to_output=False,
+        tag_length=128,
+        output_encoding=OutputEncoding.base64,
+        checksum_field="checksum",
+    )
+
+
+def test_java_email_checksum_roundtrip():
+    """Round-trip: checksum-field mode using the java-email-microservice layout."""
+    import json
+    adapter = CryptoAdapter(_java_email_profile())
+    inner = {"clientId": "RSA-0924", "policyCode": "RSA-0924"}
+    body = adapter.encrypt_body_json({}, inner)
+    # Wrapper must carry only the checksum field
+    assert set(body.keys()) == {"checksum"}
+    # Blob layout: salt(16) + iv(12) + ct + tag(16)
+    import base64
+    raw = base64.b64decode(body["checksum"])
+    assert len(raw) >= 44
+    assert len(raw) == 16 + 12 + 16 + len(raw) - 44
+    assert raw[:8] != b"Salted__"
+    decrypted = adapter.decrypt_body_json(body)
+    assert decrypted == inner
+
+
+def test_java_email_full_body_roundtrip():
+    """Full-body encryption with the same layout (no checksum field used)."""
+    import json
+    profile = _java_email_profile()
+    profile.checksum_field = None
+    adapter = CryptoAdapter(profile)
+    data = {"clientId": "RSA-0924", "policyCode": "RSA-0924"}
+    encrypted = adapter.encrypt_payload(data)
+    decrypted = adapter.decrypt_payload(encrypted)
+    assert json.loads(decrypted) == data
+
+
+def test_java_email_decrypt_independent_sample():
+    """Decrypt a checksum produced by an independent implementation that
+    replicates the JS binary layout (salt(16) + iv(12) + ct + tag(16))."""
+    import base64
+    import json
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+
+    expected_inner = {"clientId": "RSA-0924", "policyCode": "RSA-0924"}
+    key_material = b"HeroFin@82#Xq9Lm4VzTp7Nk1RsY$G%H"
+    salt = b"\x11" * 16
+    nonce = b"\x22" * 12
+    plaintext = json.dumps(expected_inner).encode("utf-8")
+
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000
+    )
+    key = kdf.derive(key_material)
+    ct_with_tag = AESGCM(key).encrypt(nonce, plaintext, None)
+
+    blob = salt + nonce + ct_with_tag
+    body = {"checksum": base64.b64encode(blob).decode("ascii")}
+
+    adapter = CryptoAdapter(_java_email_profile())
+    decrypted = adapter.decrypt_body_json(body)
+    assert decrypted == expected_inner
+
+
+def test_java_email_wrapper_preserves_outer_fields():
+    """Re-encrypting the inner payload preserves plaintext wrapper fields."""
+    adapter = CryptoAdapter(_java_email_profile())
+    inner = {"clientId": "RSA-0924", "policyCode": "RSA-0924"}
+    body = adapter.encrypt_body_json({}, inner)
+    outer = {"checksum": body["checksum"], "clientId": "RSA-0924", "policyCode": "RSA-0924"}
+    mutated_inner = {"clientId": "RSA-9999", "policyCode": "RSA-9999"}
+    re_wrapped = adapter.encrypt_body_json(outer, mutated_inner)
+    assert re_wrapped["clientId"] == "RSA-0924"
+    assert re_wrapped["policyCode"] == "RSA-0924"
+    assert adapter.decrypt_body_json(re_wrapped) == mutated_inner

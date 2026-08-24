@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-"""Generate the default_test_cases.xlsx test case bank."""
+"""Generate the default_test_cases.xlsx test case bank.
+
+The bank is generated from the built-in universal suite
+(src/test_cases_builtin.py), so the seed and the engine can never drift:
+the same checks the engine always runs are exactly what the xlsx contains.
+"""
+
+import os
+import sys
 
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.test_cases_builtin import BUILTIN_TEST_CASES
 
 
 def create_test_cases_xlsx(output_path: str):
@@ -34,83 +45,19 @@ def create_test_cases_xlsx(output_path: str):
         cell.border = thin_border
 
     test_cases = [
-        # --- Header scope ---
-        ("HDR-001", "Header", "Auth", "Missing Authorization header",
-         "header_missing", "Authorization", "401-401",
-         "API should reject requests without auth token", "FALSE", "TRUE"),
-        ("HDR-002", "Header", "Auth", "Invalid/expired auth token (Bearer xyz)",
-         "auth_token_invalid", "Bearer invalid_token_12345", "401-401",
-         "API should reject invalid auth tokens", "FALSE", "TRUE"),
-        ("HDR-003", "Header", "Auth", "Expired auth token pattern (Bearer expired)",
-         "auth_token_expired", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE1MTYyMzkwMjJ9", "401-401",
-         "API should reject expired tokens", "FALSE", "TRUE"),
-        ("HDR-004", "Header", "Validation", "Missing Content-Type header",
-         "header_missing", "Content-Type", "400-415",
-         "API should reject requests without Content-Type for POST/PUT", "FALSE", "TRUE"),
-        ("HDR-005", "Header", "Validation", "Invalid Content-Type header value",
-         "header_invalid_value", "Content-Type:text/plain", "400-415",
-         "API should reject non-JSON Content-Type", "FALSE", "TRUE"),
-
-        # --- Payload scope (mandatory only) ---
-        ("VAL-001", "PayloadKey", "Validation", "Remove key entirely",
-         "remove_key", "", "400-499",
-         "API should reject request with missing mandatory field", "TRUE", "TRUE"),
-        ("VAL-002", "PayloadKey", "Validation", "Empty string value",
-         "empty_value", "", "400-499",
-         "API should reject empty string for mandatory field", "TRUE", "TRUE"),
-        ("VAL-003", "PayloadKey", "Validation", "Null value",
-         "null_value", "", "400-499",
-         "API should reject null value for mandatory field", "TRUE", "TRUE"),
-        ("VAL-004", "PayloadKey", "Boundary", "Alpha-only characters (a-zA-Z)",
-         "alpha_only", "abcdefGHIJKL", "400-499",
-         "API should reject alphabetic-only input for numeric/structured fields", "TRUE", "TRUE"),
-        ("VAL-005", "PayloadKey", "Boundary", "Numeric-only characters (0-9)",
-         "numeric_only", "1234567890", "400-499",
-         "API should reject numeric-only input for string fields expecting text", "TRUE", "TRUE"),
-        ("VAL-006", "PayloadKey", "Vulnerability", "Special character injection",
-         "special_chars", "!@#$%^&*()_+{}|:\"<>?~", "400-499",
-         "API should reject or sanitize special characters", "TRUE", "TRUE"),
-        ("VAL-007", "PayloadKey", "Vulnerability", "SQL injection (string context)",
-         "sql_injection", "' OR '1'='1", "400-499",
-         "API should reject SQL injection payloads", "TRUE", "TRUE"),
-        ("VAL-008", "PayloadKey", "Vulnerability", "SQL injection (numeric context)",
-         "sql_injection", "1; DROP TABLE users", "400-499",
-         "API should reject SQL injection payloads", "TRUE", "TRUE"),
-        ("VAL-009", "PayloadKey", "Vulnerability", "XSS payload injection",
-         "xss_payload", "<script>alert('xss')</script>", "400-499",
-         "API should reject XSS injection payloads", "TRUE", "TRUE"),
-        ("VAL-010", "PayloadKey", "Boundary", "Oversized string (10,000 chars)",
-         "max_length_exceed", "", "400-499",
-         "API should reject excessively long strings", "TRUE", "TRUE"),
-        ("VAL-011", "PayloadKey", "Boundary", "Min length violation (0-length string)",
-         "min_length_violate", "", "400-499",
-         "API should reject zero-length strings for mandatory fields", "TRUE", "TRUE"),
-        ("VAL-012", "PayloadKey", "Negative", "Wrong data type (string in int field)",
-         "wrong_type", "not_an_integer", "400-499",
-         "API should reject type mismatches", "TRUE", "TRUE"),
-        ("VAL-013", "PayloadKey", "Boundary", "Negative number for numeric field",
-         "numeric_only", "-1", "400-499",
-         "API should reject negative values if not allowed", "TRUE", "TRUE"),
-        ("VAL-014", "PayloadKey", "Boundary", "Zero value for numeric field",
-         "numeric_only", "0", "400-499",
-         "API should validate zero boundary", "TRUE", "TRUE"),
-        ("VAL-015", "PayloadKey", "Vulnerability", "Unicode/emoji injection",
-         "unicode_emoji", "Hello World 👋🔥💯", "400-499",
-         "API should reject or sanitize unicode injection", "TRUE", "TRUE"),
-        ("VAL-016", "PayloadKey", "Boundary", "255 character boundary test",
-         "max_length_exceed", "", "400-499",
-         "API should enforce reasonable max length", "TRUE", "TRUE"),
-        ("VAL-017", "PayloadKey", "Vulnerability", "Oversized payload blob",
-         "oversized_payload", "", "400-499",
-         "API should reject oversized payloads", "TRUE", "TRUE"),
-
-        # --- Global scope ---
-        ("GLB-001", "Global", "Validation", "Malformed JSON body",
-         "special_chars", "{invalid_json: }", "400-499",
-         "API should reject malformed JSON", "FALSE", "TRUE"),
-        ("GLB-002", "Global", "Auth", "Auth token missing (Bearer)",
-         "auth_token_missing", "", "401-401",
-         "API should reject missing auth header", "FALSE", "TRUE"),
+        (
+            tc.test_case_id,
+            tc.scope.value,
+            tc.test_case_type.value,
+            tc.description,
+            tc.mutation_type.value,
+            tc.mutation_value or "",
+            tc.expected_status_code_range or "",
+            tc.expected_behavior,
+            "TRUE" if tc.applies_to_mandatory_only else "FALSE",
+            "TRUE" if tc.enabled else "FALSE",
+        )
+        for tc in BUILTIN_TEST_CASES
     ]
 
     for row_idx, case in enumerate(test_cases, 2):

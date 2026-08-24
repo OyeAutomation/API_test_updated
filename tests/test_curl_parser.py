@@ -102,3 +102,55 @@ def test_multiple_headers():
     # last one wins
     assert parsed.headers["X-Custom"] == "value2"
     assert parsed.headers["Authorization"] == "Bearer tok"
+
+
+def test_unknown_http_method():
+    curl = "curl -X TRACE https://api.example.com/debug"
+    parsed = parse_curl(curl)
+    assert parsed.method == "TRACE"
+
+
+def test_postman_export_format():
+    curl = "postman request POST https://api.example.com/users -H 'Content-Type: application/json' -d '{\"a\":1}'"
+    parsed = parse_curl(curl)
+    assert parsed.method == "POST"
+    assert parsed.url == "https://api.example.com/users"
+    assert parsed.body_json == {"a": 1}
+
+
+def test_multiple_data_flags_with_json():
+    curl = """curl -X POST https://api.example.com/api \\
+    -H "Content-Type: application/json" \\
+    -d '{"name":' -d '"test"}'"""
+    parsed = parse_curl(curl)
+    assert parsed.body_json == {"name": "test"}
+
+
+def test_data_urlencode():
+    curl = """curl -X POST https://api.example.com/login \\
+    -H "Content-Type: application/x-www-form-urlencoded" \\
+    --data-urlencode "username=john doe" \\
+    --data-urlencode "password=secret&value=1" """
+    parsed = parse_curl(curl)
+    assert parsed.body_json is None
+    # curl --data-urlencode percent-encodes (space -> %20, & -> %26)
+    assert "username=john%20doe" in parsed.body_raw
+    assert "password=secret%26value%3D1" in parsed.body_raw
+
+
+def test_insecure_flag():
+    curl = "curl -k https://self-signed.example.com/api"
+    parsed = parse_curl(curl)
+    assert parsed.insecure is True
+    from src.curl_parser import curl_to_requests_kwargs
+    kwargs = curl_to_requests_kwargs(parsed)
+    assert kwargs["verify"] is False
+
+
+def test_insecure_flag_absent_by_default():
+    curl = "curl https://api.example.com/users"
+    parsed = parse_curl(curl)
+    assert parsed.insecure is False
+    from src.curl_parser import curl_to_requests_kwargs
+    kwargs = curl_to_requests_kwargs(parsed)
+    assert "verify" not in kwargs

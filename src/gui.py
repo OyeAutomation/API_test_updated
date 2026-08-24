@@ -1,23 +1,40 @@
 from __future__ import annotations
 import json
 import logging
+import queue
 import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 from pathlib import Path
-from typing import Optional
 
-from src.models import Settings, TestResult
+from src.cli import build_settings
 from src.curl_parser import parse_curl
 from src.test_engine import run_suite
 from src.report_generator import generate_report
+from src.api_profile import load_profiles, find_profile
+from src.pause_controller import PauseController
+
+
+class _GuiLogHandler(logging.Handler):
+    """Route engine logger records into the GUI log panel."""
+
+    def __init__(self, gui):
+        super().__init__()
+        self._gui = gui
+        self.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+
+    def emit(self, record):
+        try:
+            self._gui.log(self.format(record), "info")
+        except Exception:
+            pass
 
 
 class APITestGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("API Security & Validation Testing Framework")
-        self.root.geometry("850x700")
+        self.root.geometry("900x760")
 
         # Style
         style = ttk.Style()
@@ -26,6 +43,18 @@ class APITestGUI:
             style.theme_use("clam")
 
         self._cancel_event = threading.Event()
+        self._ui_queue: "queue.Queue" = queue.Queue()
+        self._rate_limit_event = threading.Event()
+        self._rate_limit_result = {"action": "resume", "new_delay": None}
+        self._run_settings = None
+        self._pause_controller = None
+        self._run_active = False
+        self._current_curl_file = None
+        self.root.after(50, self._poll_ui_queue)
+
+        # Route engine logger records (per-testcase lines, etc.) into the log panel
+        logging.getLogger().addHandler(_GuiLogHandler(self))
+        logging.getLogger().setLevel(logging.INFO)
 
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -34,8 +63,20 @@ class APITestGUI:
         paned = ttk.PanedWindow(main_frame, orient=tk.VERTICAL)
         paned.pack(fill=tk.BOTH, expand=True)
 
-        top_frame = ttk.Frame(paned)
-        paned.add(top_frame, weight=0)
+        # Scrollable controls area: the settings block can exceed the window
+        # height on smaller screens, so it lives inside a canvas + scrollbar.
+        scroll_wrap = ttk.Frame(paned)
+        paned.add(scroll_wrap, weight=0)
+        self.canvas = tk.Canvas(scroll_wrap, highlightthickness=0)
+        vsb = ttk.Scrollbar(scroll_wrap, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=vsb.set)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        top_frame = ttk.Frame(self.canvas)
+        self._top_window = self.canvas.create_window((0, 0), window=top_frame, anchor="nw")
+        top_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._top_window, width=e.width))
 
         # Title
         title = ttk.Label(top_frame, text="API Test Suite", font=("Segoe UI", 16, "bold"))
@@ -128,6 +169,10 @@ class APITestGUI:
         self.test_cases_var, _ = make_file_row(files_frame, "Test Cases:")
         ttk.Button(files_frame, text="Browse...", command=lambda: self._browse_file(self.test_cases_var)).pack(padx=(18, 0))
 
+        # API profiles dir (optional, archetype-driven selection & contract evaluation)
+        self.profile_dir_var, _ = make_file_row(files_frame, "API Profiles Dir:")
+        ttk.Button(files_frame, text="Browse Dir...", command=self._browse_profile_dir).pack(padx=(18, 0))
+
         # --- Output ---
         output_frame = ttk.LabelFrame(top_frame, text="Output", padding="5")
         output_frame.pack(fill=tk.X, pady=5)
@@ -147,7 +192,7 @@ class APITestGUI:
         delay_row.pack(fill=tk.X)
         ttk.Label(delay_row, text="Delay (ms):").pack(side=tk.LEFT)
         self.delay_var = tk.IntVar(value=50)
-        ttk.Spinbox(delay_row, from_=0, to=5000, textvariable=self.delay_var, width=8).pack(side=tk.LEFT, padx=(5, 20))
+        ttk.Spinbox(delay_row, from_=0, to=30000, textvariable=self.delay_var, width=8).pack(side=tk.LEFT, padx=(5, 20))
         ttk.Label(delay_row, text="Timeout (s):").pack(side=tk.LEFT, padx=(10, 0))
         self.timeout_var = tk.IntVar(value=30)
         ttk.Spinbox(delay_row, from_=1, to=300, textvariable=self.timeout_var, width=8).pack(side=tk.LEFT, padx=(5, 0))
@@ -162,6 +207,10 @@ class APITestGUI:
         self.run_btn.pack(side=tk.LEFT, padx=(0, 10))
         self.cancel_btn = ttk.Button(action_frame, text="Cancel", command=self._cancel_tests, state=tk.DISABLED)
         self.cancel_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.pause_btn = ttk.Button(action_frame, text="Pause", command=self._pause_tests, state=tk.DISABLED)
+        self.pause_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.resume_btn = ttk.Button(action_frame, text="Resume", command=self._resume_tests, state=tk.DISABLED)
+        self.resume_btn.pack(side=tk.LEFT, padx=(0, 10))
         self.seed_btn = ttk.Button(action_frame, text="Seed Test Cases", command=self._seed_test_cases)
         self.seed_btn.pack(side=tk.LEFT, padx=(0, 10))
         self.status_label = ttk.Label(action_frame, text="Ready", font=("Segoe UI", 9, "italic"))
@@ -188,10 +237,66 @@ class APITestGUI:
         self.log_text.tag_configure("error", foreground="#f44747")
         self.log_text.tag_configure("bold", font=("Consolas", 9, "bold"))
 
+        # All widgets are built now — bind mousewheel scrolling to every
+        # control (bound after construction so the recursion covers them).
+        self._bind_mousewheel(top_frame)
+
+    def _ui(self, fn, *args, **kwargs):
+        """Schedule a call on the Tk main thread from any thread.
+
+        Tkinter is not thread-safe; worker threads must never touch widgets
+        directly, so all UI mutations go through this queue.
+        """
+        self._ui_queue.put((fn, args, kwargs))
+
+    def _poll_ui_queue(self):
+        try:
+            while True:
+                fn, args, kwargs = self._ui_queue.get_nowait()
+                try:
+                    fn(*args, **kwargs)
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
+        self.root.after(50, self._poll_ui_queue)
+
+    def _bind_mousewheel(self, widget):
+        """Recursively route the mouse wheel to the controls canvas.
+
+        Widgets that manage their own wheel events (ScrolledText, spinboxes)
+        are left untouched so their native behaviour is preserved.
+        """
+        if isinstance(widget, scrolledtext.ScrolledText):
+            return
+        if str(widget.winfo_class()) in ("TSpinbox",):
+            return
+        widget.bind("<MouseWheel>", self._on_mousewheel)
+        widget.bind("<Button-4>", self._on_mousewheel)  # Linux/X11 wheel up
+        widget.bind("<Button-5>", self._on_mousewheel)  # Linux/X11 wheel down
+        for child in widget.winfo_children():
+            self._bind_mousewheel(child)
+
+    def _on_mousewheel(self, event):
+        delta = getattr(event, "num", None)
+        if delta == 4:
+            self.canvas.yview_scroll(-1, "units")
+            return
+        if delta == 5:
+            self.canvas.yview_scroll(1, "units")
+            return
+        d = getattr(event, "delta", 0)
+        if abs(d) >= 120:
+            self.canvas.yview_scroll(-(d // 120), "units")
+        else:
+            self.canvas.yview_scroll(-1 if d > 0 else 1, "units")
+
     def log(self, msg, tag="info"):
+        self._ui(self._log_impl, msg, tag)
+
+    def _log_impl(self, msg, tag):
         self.log_text.insert(tk.END, msg + "\n", tag)
         self.log_text.see(tk.END)
-        self.root.update_idletasks()
 
     def _browse_file(self, var, save=False):
         if save:
@@ -231,6 +336,11 @@ class APITestGUI:
             files = sorted(Path(path).glob("*.curl"))
             self.batch_file_count.config(text=f"{len(files)} .curl files found" if files else "No .curl files")
 
+    def _browse_profile_dir(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.profile_dir_var.set(path)
+
     def _browse_curl(self):
         path = filedialog.askopenfilename(filetypes=[("Curl files", "*.curl"), ("All files", "*.*")])
         if path:
@@ -249,7 +359,7 @@ class APITestGUI:
         try:
             parsed = parse_curl(cmd)
             info = (
-                f"Method: {parsed.method.value}\n"
+                f"Method: {parsed.method}\n"
                 f"URL: {parsed.url}\n"
                 f"Headers: {json.dumps(parsed.headers, indent=2) if parsed.headers else '(none)'}\n"
                 f"Body: {json.dumps(parsed.body_json, indent=2) if parsed.body_json else '(none)'}\n"
@@ -264,64 +374,269 @@ class APITestGUI:
         self.log("Cancelling... (will stop after current request)", "warn")
         self.cancel_btn.config(state=tk.DISABLED)
 
+    def _pause_tests(self):
+        """Pause before the next request; the user can edit payload/settings
+        and then click Resume to continue from the current point."""
+        controller = self._pause_controller
+        if controller is None or not self._run_active:
+            return
+        controller.pause()
+        self.pause_btn.config(state=tk.DISABLED)
+        self.resume_btn.config(state=tk.NORMAL)
+        self.progress.stop()
+        self.status_label.config(text="Paused - edit payload/settings, then Resume")
+        self.log("Paused - edit the curl command / settings, then click Resume", "warn")
+
+    def _resume_tests(self):
+        """Re-read every widget, re-parse the payload, rebuild the crypto
+        adapter/settings, and continue the run from where it stopped."""
+        controller = self._pause_controller
+        if controller is None or not self._run_active:
+            return
+        try:
+            curl_mode = self.curl_mode.get()
+            delay = self.delay_var.get()
+            timeout = self.timeout_var.get()
+            include_non_mandatory = self.include_non_mandatory_var.get()
+
+            # Payload: single mode re-parses the curl text; batch mode
+            # re-reads the current file from disk.
+            if curl_mode == "single":
+                curl_text = self.curl_text.get("1.0", tk.END).strip()
+                if not curl_text:
+                    raise ValueError("curl command is empty - cannot resume")
+                parsed = parse_curl(curl_text)
+                self.log(f"  Re-parsed payload: {parsed.method} {parsed.url}", "ok")
+            else:
+                if not self._current_curl_file or not Path(self._current_curl_file).exists():
+                    raise ValueError("current curl file is missing - cannot resume")
+                cmd = Path(self._current_curl_file).read_text(encoding="utf-8").strip()
+                if not cmd:
+                    raise ValueError("current curl file is empty - cannot resume")
+                parsed = parse_curl(cmd)
+                self.log(f"  Re-read payload from {Path(self._current_curl_file).name}", "ok")
+
+            # Settings are mutated in place so all existing references stay valid
+            settings = controller.settings
+            settings.request_delay_ms = delay
+            settings.timeout_seconds = timeout
+            settings.include_non_mandatory = include_non_mandatory
+            self._run_settings = settings
+            self.log(f"  Settings updated: delay={delay} ms, timeout={timeout} s, "
+                     f"include_non_mandatory={include_non_mandatory}", "info")
+
+            # Rebuild the crypto adapter from the current crypto widgets
+            adapter = self._build_crypto_adapter()
+            if adapter.profile is not None:
+                self.log(f"  Crypto adapter rebuilt: {adapter.profile.name}", "ok")
+
+            # Reload API profiles so a changed directory takes effect
+            profile = self._resolve_api_profile(parsed)
+            if profile:
+                self.log(f"  Profile matched: {profile.name}", "ok")
+
+            controller.update(parsed=parsed, adapter=adapter, profile=profile)
+            controller.resume()
+            self.resume_btn.config(state=tk.DISABLED)
+            self.pause_btn.config(state=tk.NORMAL)
+            self.progress.start()
+            self.status_label.config(text="Running...")
+            self.log("Resumed with the updated payload/settings", "ok")
+        except Exception as e:
+            self.log(f"Cannot resume: {e}", "error")
+            messagebox.showerror("Resume failed", str(e))
+
+    def _build_crypto_adapter(self):
+        """Build a CryptoAdapter from the current crypto profile widgets."""
+        from src.crypto_adapter import CryptoAdapter
+        from src.models import CryptoProfile
+        import yaml
+
+        crypto_path = self.crypto_file_var.get().strip()
+        if not crypto_path:
+            return CryptoAdapter()
+        with open(crypto_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        crypto_profiles = config.get("profiles", [config])
+
+        def _find(name):
+            for p in crypto_profiles:
+                if p.get("name") == name:
+                    return p
+            return None
+
+        crypto_config = _find(self.profile_name_var.get().strip())
+        if not crypto_config:
+            raise ValueError(f"Profile '{self.profile_name_var.get().strip()}' not found in {crypto_path}")
+        CryptoProfile(**crypto_config)
+
+        response_crypto_config = None
+        if self.use_response_profile_var.get():
+            resp_name = self.response_profile_name_var.get().strip()
+            if resp_name:
+                response_crypto_config = _find(resp_name)
+                if not response_crypto_config:
+                    raise ValueError(f"Response profile '{resp_name}' not found in {crypto_path}")
+                CryptoProfile(**response_crypto_config)
+
+        if response_crypto_config:
+            return CryptoAdapter(CryptoProfile(**crypto_config), CryptoProfile(**response_crypto_config))
+        return CryptoAdapter(CryptoProfile(**crypto_config))
+
+    def _resolve_api_profile(self, parsed):
+        """Find the per-endpoint API profile for the (possibly new) payload."""
+        profile_dir = self.profile_dir_var.get().strip()
+        if not profile_dir:
+            return None
+        profiles = load_profiles(profile_dir)
+        if not profiles:
+            return None
+        if self.curl_mode.get() == "batch" and self._current_curl_file:
+            return find_profile(profiles, parsed, Path(self._current_curl_file).stem)
+        return find_profile(profiles, parsed)
+
+    def _on_rate_limit(self, resp, consecutive):
+        """Called from the worker thread when a 429/IP block is detected.
+
+        Shows a modal dialog on the main thread (via the _ui queue) and
+        blocks the worker until the user resumes or cancels. Returns the
+        (action, new_delay) tuple the engine's rate-limit guard expects.
+        """
+        self._rate_limit_result = {"action": "resume", "new_delay": None}
+        self._rate_limit_event.clear()
+        self._ui(self._show_rate_limit_dialog, resp, consecutive)
+        self._rate_limit_event.wait()
+        result = self._rate_limit_result
+        return result["action"], result["new_delay"]
+
+    def _show_rate_limit_dialog(self, resp, consecutive):
+        """Main thread: modal dialog for the rate-limit pause."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Rate limit / IP block detected")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        msg = (f"HTTP {resp.status_code} - block #{consecutive}\n\n"
+               f"Your IP may be temporarily rate-limited or blocked.\n"
+               f"Unblock it, then resume - or cancel the run.")
+        ttk.Label(dialog, text=msg, wraplength=400, justify=tk.LEFT).pack(padx=15, pady=(12, 6))
+
+        row = ttk.Frame(dialog)
+        row.pack(padx=15, pady=6)
+        ttk.Label(row, text="Delay between requests (ms):").pack(side=tk.LEFT)
+        current_delay = getattr(self._run_settings, "request_delay_ms", None)
+        if current_delay is None:
+            current_delay = self.delay_var.get()
+        delay_var = tk.IntVar(value=current_delay)
+        ttk.Spinbox(row, from_=0, to=30000, textvariable=delay_var, width=8).pack(side=tk.LEFT, padx=(6, 0))
+
+        btn_row = ttk.Frame(dialog)
+        btn_row.pack(padx=15, pady=(6, 12))
+
+        def finish(action, new_delay):
+            if new_delay is not None and new_delay >= 0:
+                if self._run_settings is not None:
+                    self._run_settings.request_delay_ms = new_delay
+                self.delay_var.set(new_delay)
+                self.log(f"Delay between requests updated to {new_delay} ms", "warn")
+            self._rate_limit_result = {"action": action, "new_delay": new_delay}
+            if action == "cancel":
+                self.log("Run cancelled at rate-limit pause", "error")
+                self._cancel_event.set()
+            self._rate_limit_event.set()
+            dialog.destroy()
+
+        def read_delay():
+            try:
+                return delay_var.get()
+            except (tk.TclError, ValueError):
+                return None
+
+        ttk.Button(btn_row, text="Resume", command=lambda: finish("resume", None)).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_row, text="Resume & Apply Delay",
+                   command=lambda: finish("resume", read_delay())).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_row, text="Cancel", command=lambda: finish("cancel", None)).pack(side=tk.LEFT, padx=3)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: finish("cancel", None))
+
+        self.log(f"[BLOCK] HTTP {resp.status_code} - pausing; unblock your IP, then resume or cancel", "error")
+        self.status_label.config(text="Paused - rate limit / IP block - waiting for you")
+        dialog.wait_window()
+
     def _seed_test_cases(self):
         def task():
-            self.run_btn.config(state=tk.DISABLED)
-            self.seed_btn.config(state=tk.DISABLED)
-            self.progress.start()
-            self.status_label.config(text="Seeding test cases...")
+            self._ui(self.run_btn.config, state=tk.DISABLED)
+            self._ui(self.seed_btn.config, state=tk.DISABLED)
+            self._ui(self.progress.start)
+            self._ui(self.status_label.config, text="Seeding test cases...")
             self.log("Seeding default test cases...", "info")
             try:
                 from scripts.seed_test_cases import create_test_cases_xlsx
                 output_path = Path(__file__).parent.parent / "test_cases" / "default_test_cases.xlsx"
                 create_test_cases_xlsx(str(output_path))
                 self.log("Done - test cases created.", "ok")
-                messagebox.showinfo("Success", f"Created: {output_path}")
+                self._ui(messagebox.showinfo, "Success", f"Created: {output_path}")
             except Exception as e:
                 self.log(f"Error: {e}", "error")
-                messagebox.showerror("Error", str(e))
+                self._ui(messagebox.showerror, "Error", str(e))
             finally:
-                self.progress.stop()
-                self.status_label.config(text="Ready")
-                self.run_btn.config(state=tk.NORMAL)
-                self.seed_btn.config(state=tk.NORMAL)
+                self._ui(self.progress.stop)
+                self._ui(self.status_label.config, text="Ready")
+                self._ui(self.run_btn.config, state=tk.NORMAL)
+                self._ui(self.seed_btn.config, state=tk.NORMAL)
         threading.Thread(target=task, daemon=True).start()
 
     def _run_tests(self):
+        # Read every widget/variable on the main thread — Tk is not
+        # thread-safe, so the worker thread must never touch widgets.
+        curl_mode = self.curl_mode.get()
+        curl_text = self.curl_text.get("1.0", tk.END).strip()
+        curl_dir = self.curl_dir_var.get().strip()
+        crypto_path = self.crypto_file_var.get().strip()
+        crypto_profile_name = self.profile_name_var.get().strip()
+        use_response_profile = self.use_response_profile_var.get()
+        response_profile_name = self.response_profile_name_var.get().strip()
+        test_cases_path = self.test_cases_var.get().strip()
+        output_raw = self.output_var.get().strip()
+        profile_dir = self.profile_dir_var.get().strip()
+        delay = self.delay_var.get()
+        timeout = self.timeout_var.get()
+        include_non_mandatory = self.include_non_mandatory_var.get()
+
         def task():
             self._cancel_event.clear()
-            self.run_btn.config(state=tk.DISABLED)
-            self.seed_btn.config(state=tk.DISABLED)
-            self.cancel_btn.config(state=tk.NORMAL)
-            self.progress.start()
+            self._ui(self.run_btn.config, state=tk.DISABLED)
+            self._ui(self.seed_btn.config, state=tk.DISABLED)
+            self._ui(self.cancel_btn.config, state=tk.NORMAL)
+            self._ui(self.pause_btn.config, state=tk.NORMAL)
+            self._ui(self.resume_btn.config, state=tk.DISABLED)
+            self._ui(self.progress.start)
             self.log("=" * 50, "bold")
             self.log("Starting test run...", "bold")
-            self.status_label.config(text="Running...")
+            self._ui(self.status_label.config, text="Running...")
 
             try:
                 # Load crypto profile
                 crypto_config = None
                 response_crypto_config = None
-                crypto_path = self.crypto_file_var.get().strip()
                 if crypto_path:
                     import yaml
                     from src.models import CryptoProfile
-                    profile_name = self.profile_name_var.get().strip()
                     with open(crypto_path, "r", encoding="utf-8") as f:
                         config = yaml.safe_load(f)
-                    profiles = config.get("profiles", [config])
+                    crypto_profiles = config.get("profiles", [config])
 
                     def _find_profile(name):
-                        for p in profiles:
+                        for p in crypto_profiles:
                             if p.get("name") == name:
                                 return p
                         return None
 
                     # Main profile for request payload
-                    if profile_name:
-                        crypto_config = _find_profile(profile_name)
+                    if crypto_profile_name:
+                        crypto_config = _find_profile(crypto_profile_name)
                         if not crypto_config:
-                            raise ValueError(f"Profile '{profile_name}' not found in {crypto_path}")
+                            raise ValueError(f"Profile '{crypto_profile_name}' not found in {crypto_path}")
                     else:
                         raise ValueError("Enter a profile name for request payload encryption")
 
@@ -329,15 +644,15 @@ class APITestGUI:
                     missing = required - set(crypto_config.keys())
                     if missing:
                         raise ValueError(
-                            f"'{crypto_path}' profile '{profile_name}' is invalid "
+                            f"'{crypto_path}' profile '{crypto_profile_name}' is invalid "
                             f"(missing fields: {', '.join(sorted(missing))})."
                         )
                     CryptoProfile(**crypto_config)
-                    self.log(f"  Payload profile: {crypto_config.get('algorithm', 'N/A')} ({profile_name})", "ok")
+                    self.log(f"  Payload profile: {crypto_config.get('algorithm', 'N/A')} ({crypto_profile_name})", "ok")
 
                     # Optional separate response decryption profile
-                    if self.use_response_profile_var.get():
-                        resp_name = self.response_profile_name_var.get().strip()
+                    if use_response_profile:
+                        resp_name = response_profile_name
                         if resp_name:
                             response_crypto_config = _find_profile(resp_name)
                             if not response_crypto_config:
@@ -346,37 +661,59 @@ class APITestGUI:
                             self.log(f"  Response profile: {response_crypto_config.get('algorithm', 'N/A')} ({resp_name})", "ok")
 
                 # Resolve test cases
-                test_cases_path = self.test_cases_var.get().strip()
-                if not test_cases_path:
+                resolved_test_cases = test_cases_path
+                if not resolved_test_cases:
                     default = Path(__file__).parent.parent / "test_cases" / "default_test_cases.xlsx"
                     if default.exists():
-                        test_cases_path = str(default)
+                        resolved_test_cases = str(default)
                         self.log(f"  Using default test cases: {default}", "info")
 
-                settings = Settings(
-                    request_delay_ms=self.delay_var.get(),
-                    timeout_seconds=self.timeout_var.get(),
-                    include_non_mandatory=self.include_non_mandatory_var.get(),
-                )
+                settings_file = None
+                default_settings = Path(__file__).parent.parent / "config" / "settings.yaml"
+                if default_settings.exists():
+                    settings_file = str(default_settings)
+                settings = build_settings(settings_file, delay, timeout, include_non_mandatory)
+                self._run_settings = settings
+                self._run_active = True
+                self._current_curl_file = None
+                controller = PauseController(settings=settings)
+                self._pause_controller = controller
+
+                # Load API profiles (optional) for archetype-driven selection
+                profiles = {}
+                if profile_dir:
+                    profiles = load_profiles(profile_dir)
+                    if profiles:
+                        self.log(f"  Loaded {len(profiles)} API profiles from {profile_dir}", "ok")
+                    else:
+                        self.log(f"  No profiles found in {profile_dir} (continuing without)", "warn")
 
                 all_results = []
                 count = 0
 
-                if self.curl_mode.get() == "batch":
+                if curl_mode == "batch":
                     # Batch mode
-                    curl_dir = self.curl_dir_var.get().strip()
                     if not curl_dir:
                         raise ValueError("Select a curl directory for batch mode.")
                     curl_files = sorted(Path(curl_dir).glob("*.curl"))
                     if not curl_files:
                         raise ValueError(f"No .curl files found in {curl_dir}")
                     self.log(f"Batch mode: {len(curl_files)} curl files", "bold")
-                    output_dir = Path(self.output_var.get().strip() or "reports")
+                    output_dir = Path(output_raw or "reports")
+                    if output_dir.suffix.lower() == ".xlsx":
+                        self.log(f"  '{output_raw}' looks like a report file — "
+                                 f"using directory '{output_dir.parent}'", "warn")
+                        output_dir = output_dir.parent
                     output_dir.mkdir(parents=True, exist_ok=True)
                     for cf in curl_files:
                         if self._cancel_event.is_set():
                             self.log("  Batch cancelled", "warn")
                             break
+                        controller.wait_if_paused(self._cancel_event)
+                        if self._cancel_event.is_set():
+                            self.log("  Batch cancelled", "warn")
+                            break
+                        self._current_curl_file = str(cf)
                         cmd = cf.read_text(encoding="utf-8").strip()
                         if not cmd:
                             continue
@@ -385,10 +722,16 @@ class APITestGUI:
                         try:
                             parsed = parse_curl(cmd)
                             self.log(f"    API: {parsed.method} {parsed.url}", "ok")
+                            profile = find_profile(profiles, parsed, curl_name=cf.stem) if profiles else None
+                            if profile:
+                                self.log(f"    Profile: {profile.name} (archetype={profile.archetype.value})", "ok")
                             if not parsed.body_json:
                                 self.log(f"    No JSON body — header/global tests only", "warn")
-                            results = run_suite(cmd, crypto_config, test_cases_path, settings, self._cancel_event,
-                                                response_crypto_config=response_crypto_config)
+                            controller.update(parsed=parsed, profile=profile)
+                            results = run_suite(cmd, crypto_config, resolved_test_cases, settings, self._cancel_event,
+                                                response_crypto_config=response_crypto_config,
+                                                profile=profile, on_rate_limit=self._on_rate_limit,
+                                                pause_controller=controller)
                             # Generate individual report per curl file
                             grouped = {parsed.url: results}
                             report_path = output_dir / f"{cf.stem}.xlsx"
@@ -399,24 +742,29 @@ class APITestGUI:
                             self.log(f"    FAILED: {e}", "error")
                 else:
                     # Single mode
-                    curl_command = self.curl_text.get("1.0", tk.END).strip()
-                    if not curl_command:
+                    if not curl_text:
                         raise ValueError("Enter a curl command or switch to batch mode.")
                     self.log("Parsing curl command...", "info")
-                    parsed = parse_curl(curl_command)
+                    parsed = parse_curl(curl_text)
                     self.log(f"  API: {parsed.method} {parsed.url}", "ok")
+                    profile = find_profile(profiles, parsed) if profiles else None
+                    if profile:
+                        self.log(f"  Profile: {profile.name} (archetype={profile.archetype.value})", "ok")
                     if not parsed.body_json:
                         self.log(f"  No JSON body — only header/global tests will run", "warn")
                     self.log("Running test suite...", "bold")
-                    all_results = run_suite(curl_command, crypto_config, test_cases_path, settings, self._cancel_event,
-                                            response_crypto_config=response_crypto_config)
+                    controller.update(parsed=parsed, profile=profile)
+                    all_results = run_suite(curl_text, crypto_config, resolved_test_cases, settings, self._cancel_event,
+                                            response_crypto_config=response_crypto_config,
+                                            profile=profile, on_rate_limit=self._on_rate_limit,
+                                            pause_controller=controller)
 
                 # Group & generate combined report (single mode only)
-                if self.curl_mode.get() != "batch":
+                if curl_mode != "batch":
                     grouped = {}
                     for r in all_results:
                         grouped.setdefault(r.api, []).append(r)
-                    output_path = self.output_var.get().strip() or "reports/report.xlsx"
+                    output_path = output_raw or "reports/report.xlsx"
                     self.log(f"Generating report: {output_path}", "info")
                     generate_report(grouped, output_path)
                     self.log(f"Report written to {output_path}", "ok")
@@ -429,8 +777,9 @@ class APITestGUI:
                 total = len(all_results)
                 vuln_accepted = sum(
                     1 for r in all_results
-                    if r.test_case_type == "Vulnerability" and 0 < r.status_code < 400
+                    if r.test_case_type == "Vulnerability" and "VULNERABLE" in r.status
                 )
+                defects = sum(1 for r in all_results if r.status.startswith("DEFECT"))
                 errors = sum(1 for r in all_results if r.test_case_type == "Error")
 
                 self.log("", "info")
@@ -439,22 +788,33 @@ class APITestGUI:
                     self.log(f"  {vuln_accepted} vulnerabilities accepted (check report!)", "warn")
                 else:
                     self.log(f"  0 vulnerabilities accepted", "ok")
+                if defects:
+                    self.log(f"  {defects} contract defects (check report!)", "warn")
+                else:
+                    self.log(f"  0 contract defects", "ok")
                 self.log(f"  {errors} errors", "warn" if errors else "info")
 
-                self.status_label.config(text=f"Done - {total} tests")
-                batch_note = f"\nReports: {output_str}" if self.curl_mode.get() == "batch" else ""
-                messagebox.showinfo("Complete", f"{total} tests, {vuln_accepted} vulns accepted, {errors} errors{batch_note}")
+                self._ui(self.status_label.config, text=f"Done - {total} tests")
+                batch_note = f"\nReports: {output_str}" if curl_mode == "batch" else ""
+                self._ui(messagebox.showinfo, "Complete",
+                         f"{total} tests, {vuln_accepted} vulns accepted, "
+                         f"{defects} contract defects, {errors} errors{batch_note}")
 
             except Exception as e:
                 self.log(f"ERROR: {e}", "error")
-                self.status_label.config(text="Failed")
-                messagebox.showerror("Error", str(e))
+                self._ui(self.status_label.config, text="Failed")
+                self._ui(messagebox.showerror, "Error", str(e))
             finally:
                 self._cancel_event.clear()
-                self.progress.stop()
-                self.cancel_btn.config(state=tk.DISABLED)
-                self.run_btn.config(state=tk.NORMAL)
-                self.seed_btn.config(state=tk.NORMAL)
+                self._ui(self.progress.stop)
+                self._ui(self.cancel_btn.config, state=tk.DISABLED)
+                self._ui(self.pause_btn.config, state=tk.DISABLED)
+                self._ui(self.resume_btn.config, state=tk.DISABLED)
+                self._ui(self.run_btn.config, state=tk.NORMAL)
+                self._ui(self.seed_btn.config, state=tk.NORMAL)
+                self._run_active = False
+                self._pause_controller = None
+                self._current_curl_file = None
 
         threading.Thread(target=task, daemon=True).start()
 

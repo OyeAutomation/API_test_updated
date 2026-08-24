@@ -2,7 +2,6 @@
 """Integration test that starts the mock server and runs the full test suite."""
 import sys
 import os
-import json
 import subprocess
 import time
 import threading
@@ -10,10 +9,9 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
-from src.cli import _load_crypto_profile
 from src.test_engine import run_suite
 from src.report_generator import generate_report
-from src.models import TestResult, Settings
+from src.models import Settings
 
 
 def test_register_endpoint():
@@ -92,7 +90,7 @@ def verify_report(report_path):
     wb = openpyxl.load_workbook(report_path)
     ws = wb.active
     headers = [cell.value for cell in ws[1]]
-    expected = ["API", "Key", "TestCase", "TestCaseType", "Status", "Mandatory", "StatusCode",
+    expected = ["API", "TestCase ID", "Key", "TestCase", "TestCaseType", "Status", "Mandatory", "StatusCode",
                 "Response", "Decrypted Response", "Decrypted Payload Sent", "Encrypted Payload"]
     assert headers == expected, f"Header mismatch: {headers}"
     row_count = ws.max_row - 1
@@ -156,6 +154,13 @@ if __name__ == "__main__":
         )
         errors = sum(1 for r in all_results if r.test_case_type == "Error")
         print(f"\nSummary: {total} results, {vuln_accepted} accepted, {errors} errors")
+
+        if errors > 0:
+            print("Integration test FAILED: errors in results")
+            sys.exit(1)
+        if vuln_accepted > 0:
+            print("Integration test FAILED: mock server accepted malicious payloads")
+            sys.exit(1)
         print("Integration test PASSED ✓")
 
     finally:

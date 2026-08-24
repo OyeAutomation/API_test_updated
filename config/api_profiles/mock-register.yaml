@@ -1,0 +1,23 @@
+# Per-endpoint API profile — declares HOW to test an endpoint.
+#
+# Fields:
+#   name                  unique profile name (match curl-file stem in batch mode)
+#   match                 URL substring used to auto-match a curl to this profile
+#   archetype             read_list | write | login | otp | export | job | generic
+#   auth_required         False -> auth tests are skipped (N/A)
+#   body_type             none | json | checksum
+#   query_params          params eligible for pagination/filter tests
+#   sensitive_fields      field names that must never leak into responses
+#   expected_success_code HTTP code a valid request must return
+#   auth_rejection_codes  codes treated as valid auth rejection (default [401])
+#   validation_rejection_codes codes treated as valid payload rejection (default [400, 422])
+#   sla_seconds           response time SLA for the performance check
+name: mock-register
+match: "localhost:5000/api/register"
+archetype: write
+auth_required: false
+body_type: json
+expected_success_code: 201
+sensitive_fields:
+  - password
+  - token

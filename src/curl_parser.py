@@ -2,11 +2,11 @@ from __future__ import annotations
 import json
 import shlex
 import logging
-from urllib.parse import urlparse, parse_qs, urlencode
-from typing import Optional, List, Tuple
+from urllib.parse import urlparse, parse_qs, quote
+from typing import Optional, List, Tuple, Dict
 import base64
 
-from src.models import ParsedRequest, HttpMethod
+from src.models import ParsedRequest
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +39,14 @@ def parse_curl(curl_string: str) -> ParsedRequest:
 
 
 def _parse_tokens(tokens: List[str]) -> ParsedRequest:
-    method = HttpMethod.GET
+    method = "GET"
     url = ""
     headers: List[Tuple[str, str]] = []
     query_params: Dict[str, List[str]] = {}
     body_parts: List[str] = []
     cookies: Dict[str, str] = {}
     user_credentials: Optional[str] = None
+    insecure = False
     i = 0
 
     while i < len(tokens):
@@ -54,7 +55,7 @@ def _parse_tokens(tokens: List[str]) -> ParsedRequest:
         if token in ("-X", "--request"):
             i += 1
             if i < len(tokens):
-                method = HttpMethod(tokens[i].upper())
+                method = tokens[i].upper()
         elif token in ("-H", "--header"):
             i += 1
             if i < len(tokens):
@@ -69,7 +70,12 @@ def _parse_tokens(tokens: List[str]) -> ParsedRequest:
         elif token == "--data-urlencode":
             i += 1
             if i < len(tokens):
-                body_parts.append(tokens[i])
+                part = tokens[i]
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    body_parts.append(f"{k}={quote(v, safe='')}")
+                else:
+                    body_parts.append(quote(part, safe=''))
         elif token in ("-b", "--cookie"):
             i += 1
             if i < len(tokens):
@@ -83,13 +89,13 @@ def _parse_tokens(tokens: List[str]) -> ParsedRequest:
             i += 1
             if i < len(tokens):
                 user_credentials = tokens[i]
-        elif token in ("--compressed", "-k", "--insecure", "-s", "--silent"):
-            if token in ("-k", "--insecure"):
-                logger.info("Ignored --insecure/-k flag (TLS verification not handled by tool)")
+        elif token in ("-k", "--insecure"):
+            insecure = True
+        elif token in ("--compressed", "-s", "--silent"):
             pass  # ignored silently
-        elif token == "--url" and not url:
+        elif token == "--url":
             i += 1
-            if i < len(tokens):
+            if i < len(tokens) and not url:
                 url = tokens[i]
                 parsed_url = urlparse(url)
                 if parsed_url.query:
@@ -124,11 +130,26 @@ def _parse_tokens(tokens: List[str]) -> ParsedRequest:
     body_raw = "&".join(body_parts) if body_parts else ""
     body_json: Optional[Dict] = None
     if body_raw:
-        if method == HttpMethod.GET and body_parts:
-            method = HttpMethod.POST
+        if method == "GET" and body_parts:
+            method = "POST"
         # Try to parse as JSON
         ct = headers_dict.get("Content-Type", "")
-        if "application/json" in ct.lower():
+        if "application/json" in ct.lower() and len(body_parts) > 1:
+            # Multiple -d flags with JSON: "&"-joining corrupts JSON. Try
+            # concatenation first, then the last part alone, then fall back.
+            for candidate in ("".join(body_parts), body_parts[-1], body_raw):
+                try:
+                    body_json = json.loads(candidate)
+                    body_raw = candidate
+                    break
+                except json.JSONDecodeError:
+                    continue
+            else:
+                logger.warning(
+                    "Multiple -d flags with application/json did not form valid JSON "
+                    "- payload tests will be skipped for this request"
+                )
+        elif "application/json" in ct.lower():
             try:
                 body_json = json.loads(body_raw)
             except json.JSONDecodeError:
@@ -149,6 +170,7 @@ def _parse_tokens(tokens: List[str]) -> ParsedRequest:
         body_raw=body_raw,
         body_json=body_json,
         cookies=cookies,
+        insecure=insecure,
     )
     return parsed
 
@@ -156,7 +178,7 @@ def _parse_tokens(tokens: List[str]) -> ParsedRequest:
 def curl_to_requests_kwargs(parsed: ParsedRequest) -> dict:
     """Convert ParsedRequest to arguments for requests.request()."""
     kwargs: dict = {
-        "method": parsed.method.value,
+        "method": parsed.method,
         "url": parsed.url,
         "headers": parsed.headers,
     }
@@ -168,4 +190,6 @@ def curl_to_requests_kwargs(parsed: ParsedRequest) -> dict:
         kwargs["data"] = parsed.body_raw
     if parsed.cookies:
         kwargs["cookies"] = parsed.cookies
+    if parsed.insecure:
+        kwargs["verify"] = False
     return kwargs

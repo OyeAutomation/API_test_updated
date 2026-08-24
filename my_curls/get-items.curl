@@ -1,0 +1,2 @@
+curl -X GET http://localhost:5000/api/items?page=1&status=active \
+  -H "Accept: application/json"

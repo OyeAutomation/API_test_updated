@@ -52,7 +52,21 @@ def test_alpha_only(sample_payload):
 
 def test_numeric_only(sample_payload):
     result = apply_mutation(sample_payload, MutationType.NUMERIC_ONLY, "age")
-    assert result["age"] == "1234567890"
+    # Numeric fields keep their numeric type; the mutation value is converted
+    assert result["age"] == 1234567890
+    assert isinstance(result["age"], int)
+
+
+def test_numeric_only_negative_on_numeric_field(sample_payload):
+    result = apply_mutation(sample_payload, MutationType.NUMERIC_ONLY, "age", "-1")
+    assert result["age"] == -1
+    assert isinstance(result["age"], int)
+
+
+def test_numeric_only_string_field_stays_string(sample_payload):
+    result = apply_mutation(sample_payload, MutationType.NUMERIC_ONLY, "username", "0")
+    assert result["username"] == "0"
+    assert isinstance(result["username"], str)
 
 
 def test_special_chars(sample_payload):
@@ -131,3 +145,14 @@ def test_auth_token_invalid():
     result = apply_mutation({}, MutationType.AUTH_TOKEN_INVALID, "")
     assert result["_header_action"] == "modify"
     assert "Authorization" in result["_header_spec"]
+
+
+def test_malformed_json():
+    result = apply_mutation({"a": 1}, MutationType.MALFORMED_JSON, "")
+    assert "_malformed_json" in result
+    assert result["_malformed_json"] == '{"username": "admin", "email": "admin@test.com"'
+
+
+def test_malformed_json_with_custom_value():
+    result = apply_mutation({"a": 1}, MutationType.MALFORMED_JSON, "", "{broken")
+    assert result["_malformed_json"] == "{broken"

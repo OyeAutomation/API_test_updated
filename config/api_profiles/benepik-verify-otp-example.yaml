@@ -1,0 +1,13 @@
+# Benepik-style example: HTTP 200 + business status inside the JSON body,
+# and custom auth codes (403 "account locked" for bad tokens).
+name: benepik-verify-otp-example
+match: "verify-otp"
+archetype: otp
+auth_required: true
+body_type: checksum
+expected_success_code: 200
+auth_rejection_codes: [401, 403]
+sensitive_fields:
+  - otp
+  - password
+  - token
