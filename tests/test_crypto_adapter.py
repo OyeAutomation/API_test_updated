@@ -436,3 +436,94 @@ def test_java_email_wrapper_preserves_outer_fields():
     assert re_wrapped["clientId"] == "RSA-0924"
     assert re_wrapped["policyCode"] == "RSA-0924"
     assert adapter.decrypt_body_json(re_wrapped) == mutated_inner
+
+
+def _upload_kyc_profile():
+    """Upload-KYC Java JWE-style layout: checksum field holds a base64-encoded
+    JSON envelope with named salt/iv/ciphertext/tag fields, PBKDF2-SHA512 x500."""
+    return CryptoProfile(
+        name="Upload-KYC",
+        algorithm=Algorithm.AES_256_GCM,
+        key_derivation=KeyDerivation.PBKDF2HMAC,
+        hash="SHA512",
+        iterations=500,
+        key="QmVuZXBpa0AyMDIzX0JlbmVwaWtQbHVz",
+        key_encoding=KeyEncoding.utf8,
+        salt="",
+        salt_from_data=True,
+        iv="random",
+        iv_length=12,
+        iv_encoding=KeyEncoding.base64,
+        prepend_iv_to_output=False,
+        tag_length=128,
+        output_encoding=OutputEncoding.base64,
+        checksum_field="checksum",
+        json_format=True,
+    )
+
+
+def test_json_format_checksum_roundtrip():
+    """Round-trip: encrypt inner payload into JSON envelope, then decrypt back."""
+    import base64
+    import json
+    adapter = CryptoAdapter(_upload_kyc_profile())
+    inner = {"pan": "AAAAA1234A", "dob": "1990-01-01"}
+    body = adapter.encrypt_body_json({}, inner)
+    assert set(body.keys()) == {"checksum"}
+    # The checksum must be a base64-encoded JSON envelope with named fields
+    envelope = json.loads(base64.b64decode(body["checksum"]))
+    assert set(envelope.keys()) == {"v", "cipher", "salt", "iv", "ciphertext", "tag"}
+    assert envelope["v"] == 3
+    assert envelope["cipher"] == "aes-256-gcm"
+    decrypted = adapter.decrypt_body_json(body)
+    assert decrypted == inner
+
+
+def test_json_format_wrapper_preserves_outer_fields():
+    """Re-encrypting the inner payload preserves plaintext wrapper fields."""
+    adapter = CryptoAdapter(_upload_kyc_profile())
+    inner = {"pan": "AAAAA1234A", "dob": "1990-01-01"}
+    body = adapter.encrypt_body_json({}, inner)
+    outer = {"checksum": body["checksum"], "clientId": "KYC-0001", "type": "upload"}
+    mutated_inner = {"pan": "BBBBB5678B", "dob": "1992-02-02"}
+    re_wrapped = adapter.encrypt_body_json(outer, mutated_inner)
+    assert re_wrapped["clientId"] == "KYC-0001"
+    assert re_wrapped["type"] == "upload"
+    assert adapter.decrypt_body_json(re_wrapped) == mutated_inner
+
+
+def test_json_format_decrypt_independent_sample():
+    """Decrypt a JSON-envelope checksum produced by an independent implementation
+    (simulates a captured Upload-KYC payload). Matches the PHP/JS reference where
+    the PBKDF2 salt is the envelope salt with the ASCII suffix 'enc' appended."""
+    import base64
+    import json
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+
+    expected_inner = {"pan": "AAAAA1234A", "dob": "1990-01-01"}
+    key_material = b"QmVuZXBpa0AyMDIzX0JlbmVwaWtQbHVz"
+    salt = b"\x11" * 32
+    nonce = b"\x22" * 12
+    plaintext = json.dumps(expected_inner, separators=(",", ":")).encode("utf-8")
+
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA512(), length=32, salt=salt + b"enc", iterations=500
+    )
+    key = kdf.derive(key_material)
+    ct_with_tag = AESGCM(key).encrypt(nonce, plaintext, None)
+
+    envelope = {
+        "v": 3,
+        "cipher": "aes-256-gcm",
+        "salt": salt.hex(),
+        "iv": nonce.hex(),
+        "ciphertext": base64.b64encode(ct_with_tag[:-16]).decode("ascii"),
+        "tag": ct_with_tag[-16:].hex(),
+    }
+    body = {"checksum": base64.b64encode(json.dumps(envelope).encode("utf-8")).decode("ascii")}
+
+    adapter = CryptoAdapter(_upload_kyc_profile())
+    decrypted = adapter.decrypt_body_json(body)
+    assert decrypted == expected_inner

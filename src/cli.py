@@ -82,11 +82,13 @@ def cli(verbose: bool):
 @click.option("--settings", "settings_file", type=click.Path(exists=True, dir_okay=False), default=None, help="Path to settings YAML (default: config/settings.yaml if present)")
 @click.option("--profile-dir", type=click.Path(exists=True, file_okay=False), default=None, help="Directory of per-endpoint API profile YAMLs (archetype-driven test selection)")
 @click.option("--include-non-mandatory", is_flag=True, help="Also test non-mandatory payload keys")
+@click.option("--skip-baseline", is_flag=True, help="Skip baseline test and baseline request (for single-use / one-time payloads)")
 @click.option("--no-pause-on-rate-limit", is_flag=True, help="Do not pause on 429/IP-block responses; warn and continue (headless)")
 def run(curl_inline: Optional[str], curl_file: Optional[str], curl_dir: Optional[str],
         crypto_profile: Optional[str], profile_name: str, response_profile_name: Optional[str],
         test_cases: Optional[str], output: str, delay: int, timeout: int,
         settings_file: Optional[str], profile_dir: Optional[str], include_non_mandatory: bool,
+        skip_baseline: bool,
         no_pause_on_rate_limit: bool):
     """Run the full test suite against one or more API endpoints."""
     crypto_config = _load_crypto_profile(crypto_profile, profile_name)
@@ -109,7 +111,9 @@ def run(curl_inline: Optional[str], curl_file: Optional[str], curl_dir: Optional
         if default_settings.exists():
             settings_file = str(default_settings)
 
-    settings = build_settings(settings_file, delay, timeout, include_non_mandatory)
+    settings = build_settings(settings_file, delay, timeout, include_non_mandatory, skip_baseline)
+    if skip_baseline:
+        console.print("[dim]Baseline tests skipped (--skip-baseline) — single-use payload mode[/dim]")
 
     cancel_event = threading.Event()
     on_rate_limit = None if no_pause_on_rate_limit else _make_cli_pause_callback(settings)
@@ -294,7 +298,7 @@ def _read_curl(inline: Optional[str], file_path: Optional[str]) -> Optional[str]
 
 
 def build_settings(settings_file: Optional[str], delay: int, timeout: int,
-                   include_non_mandatory: bool) -> Settings:
+                   include_non_mandatory: bool, skip_baseline: bool = False) -> Settings:
     """Build Settings from a YAML file (optional), with CLI values taking precedence."""
     data: Dict = {}
     if settings_file:
@@ -307,8 +311,10 @@ def build_settings(settings_file: Optional[str], delay: int, timeout: int,
     data.pop("request_delay_ms", None)
     data.pop("timeout_seconds", None)
     data.pop("include_non_mandatory", None)
+    data.pop("skip_baseline", None)
     return Settings(**data, request_delay_ms=delay, timeout_seconds=timeout,
-                    include_non_mandatory=include_non_mandatory)
+                    include_non_mandatory=include_non_mandatory,
+                    skip_baseline=skip_baseline)
 
 
 def _load_crypto_profile(profile_path: Optional[str], profile_name: str) -> Optional[Dict]:

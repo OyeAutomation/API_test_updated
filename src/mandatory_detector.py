@@ -101,14 +101,18 @@ def detect_mandatory_fields(
 
         kwargs = curl_to_requests_kwargs(parsed)
 
-        # Send baseline request (original curl, unchanged)
-        try:
-            baseline_resp = _send_request(kwargs, parsed, crypto_adapter, settings, rate_guard=rate_guard)
-            baseline_status = baseline_resp.status_code
-        except requests.RequestException as e:
-            logger.warning(f"Baseline request failed: {e} — skipping mandatory detection")
-            return None, None, 0, []
-        logger.info(f"Baseline: {baseline_status}")
+        # Send baseline request (original curl, unchanged) — skipped for single-use payloads
+        if settings.skip_baseline:
+            logger.info("Skipping baseline request — single-use payload (skip_baseline enabled)")
+            baseline_status = 200
+        else:
+            try:
+                baseline_resp = _send_request(kwargs, parsed, crypto_adapter, settings, rate_guard=rate_guard)
+                baseline_status = baseline_resp.status_code
+            except requests.RequestException as e:
+                logger.warning(f"Baseline request failed: {e} — skipping mandatory detection")
+                return None, None, 0, []
+            logger.info(f"Baseline: {baseline_status}")
 
         # Get all keys from the INNER payload
         all_keys = _get_all_keys(inner_json, max_depth=settings.max_nesting_depth)

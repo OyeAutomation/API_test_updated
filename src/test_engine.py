@@ -173,6 +173,20 @@ def run_suite(
         if cancel_event and cancel_event.is_set():
             logger.info("Test run cancelled")
             break
+        # Single-use payload: skip baseline test (GLB-003) without consuming the payload
+        if settings.skip_baseline and tc.mutation_type == MutationType.BASELINE:
+            logger.info(f"  {tc.test_case_id}: Skipped — skip_baseline enabled (single-use payload)")
+            results.append(TestResult(
+                api=parsed.url,
+                key="",
+                test_case=tc.description,
+                test_case_id=tc.test_case_id,
+                test_case_type="Skipped",
+                status="N/A — skipped (single-use payload, skip_baseline enabled)",
+                mandatory="N/A",
+                status_code=0,
+            ))
+            continue
         applicable, reason = test_applicable(tc, parsed, profile)
         if not applicable:
             logger.info(f"  {tc.test_case_id}: N/A — {reason}")

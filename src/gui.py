@@ -200,6 +200,14 @@ class APITestGUI:
         ttk.Checkbutton(delay_row, text="Include non-mandatory keys",
                         variable=self.include_non_mandatory_var).pack(side=tk.LEFT, padx=(20, 0))
 
+        skip_row = ttk.Frame(settings_frame)
+        skip_row.pack(fill=tk.X, pady=(3, 0))
+        self.skip_baseline_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(skip_row, text="Skip baseline (single-use payload)",
+                        variable=self.skip_baseline_var).pack(side=tk.LEFT)
+        ttk.Label(skip_row, text="(avoids burning one-time payload on GLB-003 + detector baseline)",
+                  font=("Segoe UI", 8), foreground="#666").pack(side=tk.LEFT, padx=(6, 0))
+
         # --- Run / Cancel buttons ---
         action_frame = ttk.Frame(top_frame)
         action_frame.pack(fill=tk.X, pady=10)
@@ -421,9 +429,13 @@ class APITestGUI:
             settings.request_delay_ms = delay
             settings.timeout_seconds = timeout
             settings.include_non_mandatory = include_non_mandatory
+            settings.skip_baseline = self.skip_baseline_var.get()
             self._run_settings = settings
             self.log(f"  Settings updated: delay={delay} ms, timeout={timeout} s, "
-                     f"include_non_mandatory={include_non_mandatory}", "info")
+                     f"include_non_mandatory={include_non_mandatory}, "
+                     f"skip_baseline={settings.skip_baseline}", "info")
+            if settings.skip_baseline:
+                self.log("  Baseline tests will be skipped (single-use payload mode)", "warn")
 
             # Rebuild the crypto adapter from the current crypto widgets
             adapter = self._build_crypto_adapter()
@@ -602,6 +614,7 @@ class APITestGUI:
         delay = self.delay_var.get()
         timeout = self.timeout_var.get()
         include_non_mandatory = self.include_non_mandatory_var.get()
+        skip_baseline = self.skip_baseline_var.get()
 
         def task():
             self._cancel_event.clear()
@@ -672,8 +685,10 @@ class APITestGUI:
                 default_settings = Path(__file__).parent.parent / "config" / "settings.yaml"
                 if default_settings.exists():
                     settings_file = str(default_settings)
-                settings = build_settings(settings_file, delay, timeout, include_non_mandatory)
+                settings = build_settings(settings_file, delay, timeout, include_non_mandatory, skip_baseline)
                 self._run_settings = settings
+                if skip_baseline:
+                    self.log("Baseline tests skipped — single-use payload mode enabled", "warn")
                 self._run_active = True
                 self._current_curl_file = None
                 controller = PauseController(settings=settings)

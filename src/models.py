@@ -79,6 +79,7 @@ class CryptoProfile(BaseModel):
     gcm_nonce_field: Optional[str] = None
     gcm_tag_field: Optional[str] = None
     fallback_keys: List[str] = Field(default_factory=list)
+    json_format: bool = False
 
     @field_validator("iterations")
     @classmethod
@@ -208,6 +209,7 @@ class Settings(BaseModel):
     )
     max_nesting_depth: int = 3
     include_non_mandatory: bool = False
+    skip_baseline: bool = False
 
 
 class MandatoryResult(BaseModel):

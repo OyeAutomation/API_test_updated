@@ -16,6 +16,7 @@ from src.models import CryptoProfile, Algorithm, KeyDerivation, OutputEncoding
 logger = logging.getLogger(__name__)
 
 SALTED_MAGIC = b"Salted__"
+JSON_SALT_SUFFIX = b"enc"
 
 
 class CryptoAdapter:
@@ -102,6 +103,16 @@ class CryptoAdapter:
         saved_profile = self.profile
         self.profile = profile
         try:
+            # Try JSON-wrapped format first (Java JWE style, base64-encoded JSON envelope)
+            if profile.json_format:
+                try:
+                    inner = self._decrypt_json_format(encrypted_val)
+                    logger.info(f"Decrypted checksum field '{field}' (json_format) -> {len(inner)} inner keys")
+                    self._checksum_format = "json_format"
+                    return inner
+                except Exception as e:
+                    logger.debug(f"JSON format decrypt failed: {e}")
+
             # Try CryptoJS format with the profile's own key first
             try:
                 inner = self._decrypt_checksum(encrypted_val)
@@ -185,6 +196,8 @@ class CryptoAdapter:
 
         if fmt == 'cryptojs':
             encrypted = self._encrypt_checksum(inner_json)
+        elif fmt == 'json_format' or (fmt is None and self.profile.json_format):
+            encrypted = self._encrypt_json_format(inner_json)
         else:
             encrypted = self._encrypt(inner_json)
 
@@ -372,6 +385,78 @@ class CryptoAdapter:
             profile.gcm_nonce_field: base64.b64encode(nonce).decode("ascii"),
             profile.gcm_tag_field: base64.b64encode(tag).decode("ascii"),
         }
+
+    # ------------------------------------------------------------------
+    # JSON-wrapped encrypt / decrypt (Java JWE style)
+    # ------------------------------------------------------------------
+
+    def _decrypt_json_format(self, encrypted: str) -> dict:
+        """Decrypt a JSON-wrapped payload where the checksum field contains
+        a base64-encoded JSON object with named fields (salt, iv, ciphertext, tag)
+        in hex/base64 encoding. The PBKDF2 salt is the envelope salt bytes with
+        the ASCII suffix "enc" appended (matches the PHP/JS reference
+        implementation)."""
+        profile = self.profile
+        raw_json = base64.b64decode(encrypted)
+        envelope = json.loads(raw_json.decode("utf-8"))
+
+        salt = bytes.fromhex(envelope["salt"])
+        iv = bytes.fromhex(envelope["iv"])
+        ciphertext = base64.b64decode(envelope["ciphertext"])
+        tag = bytes.fromhex(envelope["tag"])
+
+        key_bytes = self._decode_key_material(profile.key, profile.key_encoding)
+        hash_algo = getattr(hashes, profile.hash.value)()
+        kdf = PBKDF2HMAC(
+            algorithm=hash_algo,
+            length=self._key_length(),
+            salt=salt + JSON_SALT_SUFFIX,
+            iterations=profile.iterations,
+        )
+        key = kdf.derive(key_bytes)
+
+        aad = profile.aad.encode("utf-8") if profile.aad else b""
+        aesgcm = AESGCM(key)
+        plaintext = aesgcm.decrypt(iv, ciphertext + tag, aad)
+        return json.loads(plaintext.decode("utf-8"))
+
+    def _encrypt_json_format(self, inner_json: dict) -> str:
+        """Encrypt inner payload into JSON-wrapped format (Java JWE style).
+        Returns a base64-encoded JSON object with named fields. The envelope
+        salt is 32 random bytes stored in hex; the PBKDF2 salt appends the
+        ASCII suffix "enc" to those bytes (matches the PHP/JS reference
+        implementation)."""
+        profile = self.profile
+        plaintext = json.dumps(inner_json, separators=(",", ":")).encode("utf-8")
+
+        salt = os.urandom(32)
+        iv = os.urandom(profile.iv_length)
+
+        key_bytes = self._decode_key_material(profile.key, profile.key_encoding)
+        hash_algo = getattr(hashes, profile.hash.value)()
+        kdf = PBKDF2HMAC(
+            algorithm=hash_algo,
+            length=self._key_length(),
+            salt=salt + JSON_SALT_SUFFIX,
+            iterations=profile.iterations,
+        )
+        key = kdf.derive(key_bytes)
+
+        aad = profile.aad.encode("utf-8") if profile.aad else b""
+        encryptor = Cipher(algorithms.AES(key), modes.GCM(iv)).encryptor()
+        encryptor.authenticate_additional_data(aad)
+        ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+        tag = encryptor.tag
+
+        envelope = {
+            "v": 3,
+            "cipher": profile.algorithm.value.lower(),
+            "salt": salt.hex(),
+            "iv": iv.hex(),
+            "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+            "tag": tag.hex(),
+        }
+        return base64.b64encode(json.dumps(envelope).encode("utf-8")).decode("ascii")
 
     # ------------------------------------------------------------------
     # Full-body encrypt / decrypt (original mode)

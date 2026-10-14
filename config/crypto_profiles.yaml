@@ -212,3 +212,87 @@ profiles:
     output_encoding: base64
     checksum_field: checksum
 
+  - name: RSA-payload
+    algorithm: AES-256-GCM
+    key_derivation: PBKDF2HMAC
+    hash: SHA256
+    iterations: 1000
+    key: "GPAYSk@81#QsEsSfdfsdAdfgdfdDfdgfgjF$E$"
+    key_encoding: utf8
+    salt: ""
+    salt_from_data: true
+    iv: random
+    iv_length: 12
+    iv_encoding: utf8
+    prepend_iv_to_output: false
+    tag_length: 128
+    output_encoding: base64
+    checksum_field: checksum
+
+  - name: VAS-payload
+    algorithm: AES-256-GCM
+    key_derivation: PBKDF2HMAC
+    hash: SHA256
+    iterations: 1000
+    key: "GPAYSk@81#QsEsSfdfsdAdfgdfdDfdgfgjF$E$"
+    key_encoding: utf8
+    salt: ""
+    salt_from_data: true
+    iv: random
+    iv_length: 12
+    iv_encoding: utf8
+    prepend_iv_to_output: false
+    tag_length: 128
+    output_encoding: base64
+    checksum_field: checksum
+    
+  - name: VAS-response
+    algorithm: AES-256-GCM
+    key_derivation: PBKDF2HMAC
+    hash: SHA256
+    iterations: 1000
+    key: "123#@benepik#321"
+    key_encoding: utf8
+    salt: ""
+    salt_from_data: true
+    iv: random
+    iv_length: 12
+    iv_encoding: utf8
+    prepend_iv_to_output: false
+    tag_length: 128
+    output_encoding: base64
+    checksum_field: data
+    
+  - name: Upload-KYC
+    algorithm: AES-256-GCM
+    key_derivation: PBKDF2HMAC
+    hash: SHA512
+    iterations: 500
+    key: "QmVuZXBpa0AyMDIzX0JlbmVwaWtQbHVz"
+    key_encoding: utf8
+    salt: ""
+    salt_from_data: true
+    iv: random
+    iv_length: 12
+    iv_encoding: base64
+    prepend_iv_to_output: false
+    tag_length: 128
+    output_encoding: base64
+    checksum_field: checksum
+    json_format: true
+    
+  - name: gen-voucher
+    algorithm: AES-256-GCM
+    key_derivation: PBKDF2HMAC
+    hash: SHA256
+    iterations: 10
+    key: "QmVuZXBpa0AyMDIzX0JlbmVwaWtQbHVz"
+    key_encoding: utf8
+    salt: ""
+    salt_from_data: true
+    iv: random
+    iv_length: 12
+    iv_encoding: utf8
+    prepend_iv_to_output: true
+    tag_length: 128
+    output_encoding: base64
